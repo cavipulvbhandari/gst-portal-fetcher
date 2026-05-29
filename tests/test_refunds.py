@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from gstfetch.refunds import (
     DateWindow,
@@ -15,8 +15,8 @@ def test_date_windows_splits_long_span() -> None:
     # Contiguous, non-overlapping, fully covering the span.
     assert wins[0].from_date == date(2019, 1, 1)
     assert wins[-1].to_date == date(2026, 3, 31)
-    for earlier, later in zip(wins, wins[1:], strict=True):
-        assert later.from_date == earlier.to_date + (date(2019, 1, 2) - date(2019, 1, 1))
+    for earlier, later in zip(wins, wins[1:], strict=False):
+        assert later.from_date == earlier.to_date + timedelta(days=1)
         assert earlier.to_date < later.from_date
 
 
