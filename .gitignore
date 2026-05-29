@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Secrets & session material — NEVER commit these
+.env
+session_state.json
+*.har
+auth_token.txt
+
+# Fetched client data — tax data, keep out of version control
+data/
+output/
+*.sqlite
+*.sqlite3
+*.db

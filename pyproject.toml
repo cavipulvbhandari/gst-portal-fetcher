@@ -1,0 +1,52 @@
+[project]
+name = "gst-portal-fetcher"
+version = "0.1.0"
+description = "Incrementally fetch all GST portal data for a single client via a manual-login session handoff."
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0",
+    "playwright>=1.44.0",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.2.0",
+    "pyyaml>=6.0",
+    "tenacity>=8.2.0",
+    "typer>=0.12.0",
+    "rich>=13.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+    "types-PyYAML>=6.0",
+]
+
+[project.scripts]
+gstfetch = "gstfetch.cli:app"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["gstfetch*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N"]
+
+[tool.ruff.lint.per-file-ignores]
+# typer's idiomatic API puts Option/Argument calls in parameter defaults.
+"gstfetch/cli.py" = ["B008"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

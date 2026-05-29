@@ -1,0 +1,27 @@
+# Optional override for the built-in endpoint catalog.
+# Copy to endpoints.yaml and correct paths after verifying them with
+# `gstfetch capture` (which records the portal's real API calls to a HAR file).
+#
+# Only the fields you list are overridden; everything else falls back to the
+# defaults in gstfetch/endpoints.py.
+#
+# scope: once | monthly | fy
+# placeholders allowed in path/params values: {gstin} {ret_period} {fy}
+
+resources:
+  gstr3b:
+    path: /services/api/returns/gstr3b
+    scope: monthly
+    params:
+      gstin: "{gstin}"
+      ret_period: "{ret_period}"
+
+  # Example of adding a brand-new resource not in the defaults:
+  # einvoice:
+  #   scope: monthly
+  #   method: GET
+  #   path: /services/api/einvoice/list
+  #   params:
+  #     gstin: "{gstin}"
+  #     ret_period: "{ret_period}"
+  #   records_key: data
