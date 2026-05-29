@@ -13,18 +13,26 @@ terms when run by an authorised user against their own client's account.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from playwright.sync_api import Request, sync_playwright
 
+from gstfetch.client import (
+    SessionExpiredError,
+    WafBlockedError,
+    looks_like_waf_block,
+)
+from gstfetch.endpoints import ResourceSpec
 from gstfetch.logging import get_logger
 
 log = get_logger(__name__)
 
 LOGIN_URL = "https://services.gst.gov.in/services/login"
 DASHBOARD_HINT = "/services/auth/dashboard"
+GST_ORIGIN = "https://services.gst.gov.in"
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +143,112 @@ def capture(
     catalog_path.write_text(json.dumps(endpoints, indent=2, sort_keys=True), encoding="utf-8")
     log.info("Wrote HAR -> %s and %d endpoints -> %s", har_path, len(endpoints), catalog_path)
     return endpoints
+
+
+class BrowserClient:
+    """Fetch the portal's JSON APIs from inside the live logged-in browser.
+
+    Copied cookies replayed over httpx are rejected by the portal's F5
+    firewall (it fingerprints the TLS handshake and relies on short-lived
+    JavaScript-refreshed bot cookies). Instead we reopen the saved session in
+    a real Chromium page and issue each API call with the page's own
+    ``fetch()`` — so every request carries the genuine browser fingerprint,
+    the live Akamai/F5 cookies, and the real header set, exactly as the
+    portal's own SPA does. No fingerprint spoofing, no CAPTCHA automation.
+
+    Use as a context manager so the browser is always closed::
+
+        with BrowserClient(session_file, headed=True) as client:
+            payload = client.fetch(spec, ctx)
+    """
+
+    def __init__(
+        self,
+        session_file: Path,
+        *,
+        headed: bool = True,
+        request_delay: float = 1.5,
+        origin: str = GST_ORIGIN,
+    ) -> None:
+        if not session_file.exists():
+            raise FileNotFoundError(
+                f"no session file at {session_file}; run `gstfetch login` first"
+            )
+        self._session_file = session_file
+        self._headed = headed
+        self._delay = request_delay
+        self._origin = origin
+        self._pw: Any = None
+        self._browser: Any = None
+        self._context: Any = None
+        self._page: Any = None
+
+    def __enter__(self) -> BrowserClient:
+        self._pw = sync_playwright().start()
+        # Headed by default: the portal's bot management is far likelier to
+        # trust a visible browser, and the user is already in the loop.
+        self._browser = self._pw.chromium.launch(headless=not self._headed)
+        self._context = self._browser.new_context(storage_state=str(self._session_file))
+        self._page = self._context.new_page()
+        # Land on the authenticated dashboard so in-page JS sets/refreshes the
+        # firewall cookies before we start issuing API calls.
+        self._page.goto(self._origin + DASHBOARD_HINT, wait_until="domcontentloaded")
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        for closer in (self._context, self._browser):
+            if closer is not None:
+                try:
+                    closer.close()
+                except Exception:  # noqa: BLE001 — best-effort teardown
+                    pass
+        if self._pw is not None:
+            self._pw.stop()
+        self._context = self._browser = self._pw = self._page = None
+
+    def fetch(self, spec: ResourceSpec, ctx: dict[str, str]) -> Any:
+        """Issue one API call from the page context and return parsed JSON."""
+        from gstfetch.client import GstClient
+
+        if self._page is None:
+            raise RuntimeError("BrowserClient must be used as a context manager")
+        time.sleep(self._delay)
+        url = self._origin + GstClient.render_path(spec, ctx)
+        result = self._page.evaluate(_PAGE_FETCH_JS, {"url": url, "method": spec.method})
+
+        status = int(result.get("status", 0))
+        body = result.get("body", "") or ""
+        if status in (401, 403):
+            raise SessionExpiredError(f"portal returned {status} for {url}; session expired")
+        if looks_like_waf_block(body):
+            raise WafBlockedError(
+                f"firewall rejected {url} even from the live browser; "
+                "the session may be stale — run `gstfetch login` again."
+            )
+        try:
+            return json.loads(body)
+        except (ValueError, TypeError):
+            return {"_raw_text": body}
+
+
+# Runs in the page: same-origin fetch with the portal's own credentials/cookies.
+_PAGE_FETCH_JS = """
+async ({url, method}) => {
+    const resp = await fetch(url, {
+        method: method || 'GET',
+        credentials: 'include',
+        headers: {
+            'Accept': 'application/json, text/plain, */*',
+            'X-Requested-With': 'XMLHttpRequest',
+        },
+    });
+    const body = await resp.text();
+    return {status: resp.status, body};
+}
+"""
 
 
 def load_cookies(session_file: Path) -> dict[str, str]:

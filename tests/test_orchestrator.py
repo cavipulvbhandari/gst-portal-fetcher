@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from gstfetch.client import count_records
+import pytest
+
+from gstfetch.client import WafBlockedError, count_records
 from gstfetch.endpoints import load_catalog
 from gstfetch.orchestrator import ALL, _fy_is_closed, build_work, run
 from gstfetch.periods import Period
@@ -90,6 +92,35 @@ def test_run_writes_and_checkpoints(tmp_path: Path) -> None:
     # Data landed on disk.
     p = storage.path_for("gstr3b", "032024")
     assert p.exists()
+    store.close()
+
+
+class WafClient:
+    """Client that always trips the firewall."""
+
+    def fetch(self, spec: object, ctx: dict[str, str]) -> object:
+        raise WafBlockedError("firewall rejected request")
+
+
+def test_run_aborts_on_waf_block(tmp_path: Path) -> None:
+    catalog = load_catalog(None)
+    store = StateStore(tmp_path / "cp.sqlite")
+    storage = Storage(tmp_path / GSTIN)
+    start = Period.parse("032024")
+
+    with pytest.raises(WafBlockedError):
+        run(
+            catalog=catalog,
+            client=WafClient(),  # type: ignore[arg-type]
+            store=store,
+            storage=storage,
+            gstin=GSTIN,
+            start=start,
+            today=date(2024, 5, 15),
+        )
+    # The first unit is left pending so a re-run resumes, not skips.
+    summary = store.summary(GSTIN)
+    assert summary.get("pending", 0) >= 1
     store.close()
 
 

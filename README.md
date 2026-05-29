@@ -14,10 +14,18 @@ meaningful action sits behind CAPTCHA + OTP login. Rather than fight that, this
 tool keeps a human in the loop for authentication:
 
 1. **You** log in once in a real browser (CAPTCHA + OTP).
-2. The tool **captures the authenticated session** (cookies + the `authtoken`
-   header the portal's own pages send).
-3. It then **replays the portal's own internal JSON endpoints** to download
-   data, period by period.
+2. The tool **saves the authenticated browser session**.
+3. It then **reopens that session in the browser and calls the portal's own
+   internal JSON endpoints from inside the page**, period by period — exactly
+   the way the portal's SPA does.
+
+> **Why fetch from inside the browser?** The portal sits behind an F5 BIG-IP
+> firewall that fingerprints the TLS handshake and relies on short-lived,
+> JavaScript-refreshed bot cookies. Replaying copied cookies with a plain HTTP
+> client gets rejected with a `Request Rejected` page. Driving the real logged-in
+> browser sidesteps that — no fingerprint spoofing, no CAPTCHA automation. A
+> Chromium window opens and drives itself during `fetch`; leave it alone until
+> it finishes.
 
 Because you authenticate yourself against your own client's account (with their
 authorisation), this stays within normal authorised use. It does **not**
@@ -113,9 +121,10 @@ Output lands in `data/<GSTIN>/<resource>/<period>.json`.
   best-effort starting point — **verify them with `gstfetch capture`** and
   override via `endpoints.yaml` (see `endpoints.example.yaml`). When a path
   changes, you edit YAML, not code.
-- **Sessions expire.** If the portal returns 401/403/redirect, the tool stops
-  and asks you to `gstfetch login` again; re-running resumes from the last
-  checkpoint.
+- **Sessions expire.** If the portal returns 401/403/redirect, or the firewall
+  rejects requests even from the live browser (a `Request Rejected` page), the
+  tool stops and asks you to `gstfetch login` again; re-running resumes from the
+  last checkpoint.
 - **Authorisation.** Only use this against accounts you are authorised to access
   (your own, or a client who has engaged you). Keep `.env`, `session_state.json`,
   `auth_token.txt`, and `data/` out of version control — `.gitignore` already

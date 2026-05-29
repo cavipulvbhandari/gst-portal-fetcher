@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 from tenacity import (
@@ -23,13 +23,52 @@ class SessionExpiredError(RuntimeError):
     """Raised when the portal rejects the session — re-run `gstfetch login`."""
 
 
+class WafBlockedError(RuntimeError):
+    """The portal's web-application firewall rejected the request.
+
+    The GST portal sits behind an F5 BIG-IP ASM firewall that serves a
+    ``Request Rejected`` HTML page (with an HTTP 200 status) when a request
+    does not look like it came from a real browser session. This is fatal for
+    the run — copied cookies cannot satisfy it — so we stop and tell the user
+    to fetch from inside the live browser session instead.
+    """
+
+
 class TransientPortalError(RuntimeError):
     """A retryable portal/network error."""
 
 
+class Fetcher(Protocol):
+    """Anything that can fetch one resource's payload.
+
+    Implemented by :class:`GstClient` (httpx replay) and ``BrowserClient``
+    (page-context fetch); the orchestrator only needs this method.
+    """
+
+    def fetch(self, spec: ResourceSpec, ctx: dict[str, str]) -> Any: ...
+
+
+def looks_like_waf_block(text: str) -> bool:
+    """True if ``text`` is the F5 ``Request Rejected`` firewall page.
+
+    The portal returns this with a 200 status, so it cannot be distinguished
+    by HTTP code alone — we have to sniff the body. The page reliably contains
+    both a "Request Rejected" title and a numeric "support ID".
+    """
+    if not text:
+        return False
+    lowered = text.lower()
+    return "request rejected" in lowered and "support id" in lowered
+
+
 _BROWSER_HEADERS = {
     "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://services.gst.gov.in/services/auth/dashboard",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+    "X-Requested-With": "XMLHttpRequest",
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -71,6 +110,16 @@ class GstClient:
     def _render(template: str, ctx: dict[str, str]) -> str:
         return template.format(**ctx)
 
+    @staticmethod
+    def render_path(spec: ResourceSpec, ctx: dict[str, str]) -> str:
+        """Render a spec's path + query string for ``ctx`` (no base URL)."""
+        from urllib.parse import urlencode
+
+        path = spec.path.format(**ctx)
+        params = {k: v.format(**ctx) for k, v in spec.params.items()}
+        query = urlencode(params)
+        return f"{path}?{query}" if query else path
+
     @retry(
         retry=retry_if_exception_type(TransientPortalError),
         wait=wait_exponential(multiplier=2, min=2, max=16),
@@ -97,6 +146,14 @@ class GstClient:
             # Portal redirects unauthenticated API calls to the login page.
             raise SessionExpiredError(f"portal redirected {path} to login; session expired")
         resp.raise_for_status()
+
+        # The F5 firewall serves its "Request Rejected" page with a 200 status,
+        # so guard against silently storing it as if it were real data.
+        if looks_like_waf_block(resp.text):
+            raise WafBlockedError(
+                f"firewall rejected {path}; copied-cookie replay is being blocked. "
+                "Use the in-browser fetch (`gstfetch fetch` drives the logged-in browser)."
+            )
 
         try:
             return resp.json()

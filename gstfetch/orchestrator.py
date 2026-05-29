@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
-from gstfetch.client import GstClient, SessionExpiredError, count_records
+from gstfetch.client import (
+    Fetcher,
+    SessionExpiredError,
+    WafBlockedError,
+    count_records,
+)
 from gstfetch.endpoints import ResourceSpec
 from gstfetch.logging import get_logger
 from gstfetch.periods import (
@@ -85,7 +90,7 @@ def build_work(
 def run(
     *,
     catalog: list[ResourceSpec],
-    client: GstClient,
+    client: Fetcher,
     store: StateStore,
     storage: Storage,
     gstin: str,
@@ -107,7 +112,9 @@ def run(
 
         try:
             payload = client.fetch(spec, unit.ctx)
-        except SessionExpiredError:
+        except (SessionExpiredError, WafBlockedError):
+            # Fatal for the run: every subsequent call would fail the same way.
+            # Leave this unit pending so a re-run resumes from here.
             store.mark(gstin, spec.name, period, status="pending")
             raise
         except Exception as exc:  # noqa: BLE001 — record and continue

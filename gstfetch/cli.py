@@ -8,19 +8,16 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from gstfetch.client import GstClient, SessionExpiredError
+from gstfetch.client import SessionExpiredError, WafBlockedError
 from gstfetch.config import get_settings
 from gstfetch.endpoints import load_catalog
 from gstfetch.export import export_all
 from gstfetch.logging import configure_logging, get_logger
 from gstfetch.orchestrator import run
 from gstfetch.periods import Period
+from gstfetch.session import BrowserClient
 from gstfetch.session import (
     capture as capture_session,
-)
-from gstfetch.session import (
-    load_auth_token,
-    load_cookies,
 )
 from gstfetch.session import (
     login as do_login,
@@ -62,12 +59,15 @@ def fetch(
         Path("endpoints.yaml"), "--endpoints", help="Optional endpoint override YAML."
     ),
 ) -> None:
-    """Fetch all catalog resources for every applicable period, incrementally."""
+    """Fetch all catalog resources for every applicable period, incrementally.
+
+    Calls run from inside the logged-in browser session (see BrowserClient),
+    which is what gets past the portal's firewall — a window will open and
+    drive itself; leave it alone until the run finishes.
+    """
     s = get_settings()
     catalog = load_catalog(endpoints_file if endpoints_file.exists() else None)
 
-    cookies = load_cookies(s.session_file)
-    token = load_auth_token(s.session_file)
     store = StateStore(s.db_path)
     storage = Storage(s.client_dir)
     start = Period.parse(s.start_period)
@@ -77,8 +77,8 @@ def fetch(
         f"[bold]data[/] {s.client_dir}"
     )
     try:
-        with GstClient(
-            s.base_url, cookies, token, request_delay=s.request_delay
+        with BrowserClient(
+            s.session_file, headed=s.headed, request_delay=s.request_delay
         ) as client:
             stats = run(
                 catalog=catalog,
@@ -92,6 +92,13 @@ def fetch(
     except SessionExpiredError as exc:
         console.print(f"[red]Session expired:[/] {exc}\nRun [bold]gstfetch login[/] again.")
         raise typer.Exit(code=2) from exc
+    except WafBlockedError as exc:
+        console.print(
+            f"[red]Firewall block:[/] {exc}\n"
+            "Your session is likely stale — run [bold]gstfetch login[/] again, "
+            "then re-run [bold]gstfetch fetch[/] (it resumes from the last checkpoint)."
+        )
+        raise typer.Exit(code=3) from exc
     finally:
         store.close()
 
