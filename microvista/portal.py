@@ -229,26 +229,28 @@ def fetch(
         page = context.new_page()
         page.set_default_timeout(timeout_ms)
 
-        page.goto(f"{base_url}/gst-dashboard", wait_until="domcontentloaded")
-        _pause(request_delay)
-        companies = _collect_companies(page)
-        if not companies:
+        _open_gst_dashboard(page, base_url, request_delay, timeout_ms)
+        gstins = _company_gstins(page, timeout_ms)
+        if not gstins:
+            dump = _dump_debug(page, data_dir)
             raise RuntimeError(
-                "No client GSTINs found on the GST dashboard. The session may "
-                "have expired — run `microvista login` again."
+                "No client GSTINs found on the GST dashboard.\n"
+                f"Saved what the browser sees to {dump} — check that a client "
+                "list is actually visible there. If the session looks logged "
+                "out, run `microvista login` again; otherwise the page markup "
+                "may differ from the built-in selectors."
             )
 
         if gstin_filter:
-            companies = [c for c in companies if c[0] in gstin_filter]
-        log.info("Found %d client(s) to process.", len(companies))
+            gstins = [g for g in gstins if g in gstin_filter]
+        log.info("Found %d client(s) to process: %s", len(gstins), ", ".join(gstins))
 
-        for gstin, href in companies:
+        for gstin in gstins:
             summary["clients"] += 1
             rows = _process_company(
                 page,
                 base_url=base_url,
                 gstin=gstin,
-                href=href,
                 out_dir=data_dir / gstin,
                 request_delay=request_delay,
                 timeout_ms=timeout_ms,
@@ -262,25 +264,63 @@ def fetch(
     return summary
 
 
-def _collect_companies(page: Page) -> list[tuple[str, str]]:
-    """Return ``(gstin, href)`` for each client link on the GST dashboard."""
+def _open_gst_dashboard(
+    page: Page, base_url: str, request_delay: float, timeout_ms: int
+) -> None:
+    """Land on the GST dashboard (the client list), by URL or by clicking through.
+
+    Direct navigation usually works, but the single-page app may need the same
+    click path a user takes — product picker -> *Notice Alert* -> *GST* — so we
+    fall back to that if no client GSTIN shows up.
+    """
+    page.goto(f"{base_url}/gst-dashboard", wait_until="domcontentloaded")
     page.wait_for_load_state("networkidle")
-    anchors = page.locator("a").all()
-    seen: dict[str, str] = {}
-    for a in anchors:
-        try:
-            text = (a.inner_text() or "").strip()
-        except PlaywrightTimeoutError:
-            continue
-        m = GSTIN_RE.search(text)
-        if not m:
-            continue
-        gstin = m.group(0)
-        if gstin in seen:
-            continue
-        href = a.get_attribute("href") or ""
-        seen[gstin] = href
-    return list(seen.items())
+    _pause(request_delay)
+    if _has_gstin(page):
+        return
+
+    log.info("Client list not visible yet — clicking through the product menu.")
+    for label in ("Notice Alert", "GST"):
+        target = _first_visible(page, (f"text={label}",))
+        if target is not None:
+            try:
+                target.click()
+                page.wait_for_load_state("networkidle")
+                _pause(request_delay)
+            except PlaywrightTimeoutError:
+                pass
+    if not _has_gstin(page):
+        # Last resort: re-hit the dashboard URL now that product context is set.
+        page.goto(f"{base_url}/gst-dashboard", wait_until="domcontentloaded")
+        page.wait_for_load_state("networkidle")
+        _pause(request_delay)
+
+
+def _has_gstin(page: Page) -> bool:
+    try:
+        return bool(GSTIN_RE.search(page.inner_text("body")))
+    except PlaywrightTimeoutError:
+        return False
+
+
+def _company_gstins(page: Page, timeout_ms: int) -> list[str]:
+    """Every distinct client GSTIN visible on the dashboard, tag-agnostic.
+
+    Scans the rendered page text rather than assuming the GSTIN sits in an
+    ``<a>`` tag, and waits for the client table to populate (it loads via XHR
+    after the page itself is 'idle').
+    """
+    try:
+        page.wait_for_function(
+            "() => /[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]/.test"
+            "(document.body.innerText)",
+            timeout=min(timeout_ms, 20_000),
+        )
+    except PlaywrightTimeoutError:
+        return []
+    body = page.inner_text("body")
+    # Preserve first-seen order while de-duplicating.
+    return list(dict.fromkeys(GSTIN_RE.findall(body)))
 
 
 def _process_company(
@@ -288,18 +328,23 @@ def _process_company(
     *,
     base_url: str,
     gstin: str,
-    href: str,
     out_dir: Path,
     request_delay: float,
     timeout_ms: int,
     dry_run: bool,
 ) -> list[NoticeRow]:
     log.info("[%s] opening company dashboard", gstin)
-    # Open the company dashboard (the href carries the encoded company token),
-    # then click through to its Notices list exactly like a user would.
-    if href:
-        target = href if href.startswith("http") else f"{base_url}/{href.lstrip('/')}"
-        page.goto(target, wait_until="domcontentloaded")
+    # Re-open the dashboard, then click this client's GSTIN to open its
+    # company view — exactly the clicks a user makes. Clicking (vs. following an
+    # href) works whether the GSTIN is a link, a span, or a table cell.
+    _open_gst_dashboard(page, base_url, request_delay, timeout_ms)
+    link = page.get_by_text(gstin, exact=False).first
+    try:
+        link.click()
+        page.wait_for_load_state("networkidle")
+    except PlaywrightTimeoutError:
+        log.warning("[%s] could not open company view", gstin)
+        return []
     _pause(request_delay)
 
     nav = _first_visible(page, NOTICE_NAV_SELECTORS)
@@ -483,6 +528,52 @@ def _save_url_pdf(page: Page, url: str, dest: Path) -> bool:
     except Exception as exc:  # noqa: BLE001 — best-effort save; report and move on
         log.warning("failed to fetch PDF %s: %s", url, exc)
         return False
+
+
+def _dump_debug(page: Page, data_dir: Path) -> Path:
+    """Save a screenshot + HTML of the current page for troubleshooting."""
+    debug_dir = data_dir / "_debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    shot = debug_dir / "gst-dashboard.png"
+    html = debug_dir / "gst-dashboard.html"
+    try:
+        page.screenshot(path=str(shot), full_page=True)
+        html.write_text(page.content(), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — diagnostics are best-effort
+        log.warning("could not write debug artifacts: %s", exc)
+    return debug_dir
+
+
+def inspect(
+    *,
+    base_url: str,
+    session_file: Path,
+    data_dir: Path,
+    headed: bool = True,
+    request_delay: float = 1.0,
+    timeout_ms: int = 60_000,
+) -> tuple[list[str], Path]:
+    """Open the GST dashboard and report what the tool can see.
+
+    Returns ``(gstins, debug_dir)`` and always writes a screenshot + HTML so
+    selectors can be diagnosed without guessing.
+    """
+    if not session_file.exists():
+        raise FileNotFoundError(
+            f"no session at {session_file}; run `microvista login` first"
+        )
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=not headed)
+        context = browser.new_context(
+            storage_state=str(session_file), accept_downloads=True
+        )
+        page = context.new_page()
+        page.set_default_timeout(timeout_ms)
+        _open_gst_dashboard(page, base_url, request_delay, timeout_ms)
+        gstins = _company_gstins(page, timeout_ms)
+        debug_dir = _dump_debug(page, data_dir)
+        browser.close()
+    return gstins, debug_dir
 
 
 def _pause(seconds: float) -> None:

@@ -74,5 +74,32 @@ def fetch(
         console.print(f"Output under [bold]{s.data_dir}[/]")
 
 
+@app.command()
+def inspect() -> None:
+    """Diagnose what the tool sees on the GST dashboard (screenshot + HTML + GSTINs)."""
+    s = get_settings()
+    try:
+        gstins, debug_dir = portal.inspect(
+            base_url=s.base_url,
+            session_file=s.session_file,
+            data_dir=s.data_dir,
+            headed=s.headed,
+            request_delay=s.request_delay,
+            timeout_ms=s.timeout_ms,
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(code=1) from exc
+
+    if gstins:
+        console.print(f"[green]Detected {len(gstins)} GSTIN(s):[/] {', '.join(gstins)}")
+    else:
+        console.print("[yellow]No GSTINs detected on the dashboard.[/]")
+    console.print(
+        f"Saved a screenshot and HTML to [bold]{debug_dir}[/] — "
+        "open the PNG to see what the browser rendered."
+    )
+
+
 if __name__ == "__main__":
     app()
