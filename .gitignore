@@ -11,6 +11,7 @@ venv/
 # Secrets & session material — NEVER commit these
 .env
 session_state.json
+microvista_session.json
 *.har
 auth_token.txt
 

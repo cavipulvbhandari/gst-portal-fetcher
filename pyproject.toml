@@ -24,13 +24,14 @@ dev = [
 
 [project.scripts]
 gstfetch = "gstfetch.cli:app"
+microvista = "microvista.cli:app"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["gstfetch*"]
+include = ["gstfetch*", "microvista*"]
 
 [tool.ruff]
 line-length = 100
@@ -42,6 +43,7 @@ select = ["E", "F", "W", "I", "B", "UP", "N"]
 [tool.ruff.lint.per-file-ignores]
 # typer's idiomatic API puts Option/Argument calls in parameter defaults.
 "gstfetch/cli.py" = ["B008"]
+"microvista/cli.py" = ["B008"]
 
 [tool.mypy]
 python_version = "3.11"
