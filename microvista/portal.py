@@ -475,7 +475,13 @@ def _capture_pdf(page: Page, trigger: Locator, dest: Path, timeout_ms: int) -> b
     """
     context = page.context
     popups: list[Page] = []
-    context.on("page", popups.append)
+
+    # Playwright can't wrap a built-in method (e.g. list.append) as a handler,
+    # so use a plain function and keep the reference for remove_listener.
+    def _on_page(new_page: Page) -> None:
+        popups.append(new_page)
+
+    context.on("page", _on_page)
 
     download: Download | None = None
     dl_timeout = min(timeout_ms, 20_000)
@@ -511,7 +517,7 @@ def _capture_pdf(page: Page, trigger: Locator, dest: Path, timeout_ms: int) -> b
         return False
     finally:
         try:
-            context.remove_listener("page", popups.append)
+            context.remove_listener("page", _on_page)
         except (ValueError, KeyError):
             pass
 
